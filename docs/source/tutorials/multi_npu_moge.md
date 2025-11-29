@@ -1,4 +1,4 @@
-# Multi-NPU (Pangu Pro MoE)
+# Multi-NPU (Pangu-Pro-MoE)
 
 ## Run vllm-ascend on Multi-NPU
 
@@ -28,7 +28,7 @@ docker run --rm \
 -it $IMAGE bash
 ```
 
-Setup environment variables:
+Set up environment variables:
 
 ```bash
 # Set `max_split_size_mb` to reduce memory fragmentation and avoid out of memory
@@ -44,7 +44,7 @@ git clone https://gitcode.com/ascend-tribe/pangu-pro-moe-model.git
 
 ### Online Inference on Multi-NPU
 
-Run the following script to start the vLLM server on Multi-NPU:
+Run the following script to start the vLLM server on multi-NPU:
 
 ```bash
 vllm serve /path/to/pangu-pro-moe-model \
@@ -157,11 +157,6 @@ if __name__ == "__main__":
             additional_config={
             'torchair_graph_config': {
             'enabled': True,
-            },
-            'ascend_scheduler_config':{
-            'enabled': True,
-            'enable_chunked_prefill' : False,
-            'chunked_prefill_enabled': False
             },
             })
 

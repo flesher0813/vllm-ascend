@@ -21,7 +21,6 @@ from typing import Any, List, Optional, Union
 import torch
 import torch.nn.functional as F
 import vllm
-import vllm.envs as envs
 from torch import nn
 from transformers import Qwen2Config
 from vllm.attention import AttentionMetadata, AttentionType
@@ -112,12 +111,9 @@ class CustomQwen2Attention(Qwen2Attention):
                                    is_prefill=False,
                                    is_qwen_torchair=True)
             forward_kwargs = {}
-            if envs.VLLM_USE_V1:
-                output_shape = q.shape
-                output = torch.empty(output_shape,
-                                     dtype=q.dtype,
-                                     device=q.device)
-                forward_kwargs['output'] = output
+            output_shape = q.shape
+            output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
+            forward_kwargs['output'] = output
 
             attn_output = self.attn.impl.forward(self.attn,
                                                  q,
@@ -125,7 +121,6 @@ class CustomQwen2Attention(Qwen2Attention):
                                                  v,
                                                  kv_cache=kv_cache,
                                                  attn_metadata=attn_metadata,
-                                                 trace_flag=False,
                                                  **forward_kwargs)
             output, _ = self.o_proj(attn_output)
             return output
@@ -253,7 +248,7 @@ class CustomQwen2Model(Qwen2Model):
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
-                hidden_states = self.get_input_embeddings(input_ids)
+                hidden_states = self.embed_input_ids(input_ids)
             residual = None
         else:
             assert intermediate_tensors is not None
@@ -324,8 +319,8 @@ class CustomQwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
 
     def forward(
         self,

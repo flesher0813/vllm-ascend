@@ -22,8 +22,6 @@ from vllm.config import get_current_vllm_config
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
 
-from vllm_ascend.utils import version_check
-
 
 def _addrmsnorm_forward_oot(
     self,
@@ -34,10 +32,10 @@ def _addrmsnorm_forward_oot(
 ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
     import torch_npu
 
-    from vllm_ascend.utils import is_310p
+    from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
-    torch_npu_check = version_check()
-    if layer is not None and not is_310p():
+    if layer is not None and get_ascend_device_type(
+    ) != AscendDeviceType._310P:
         layer_cls_name = layer.__class__.__name__
         try:
             weight_prefetch_method = get_forward_context(
@@ -53,23 +51,15 @@ def _addrmsnorm_forward_oot(
                 start_flag=x,
             )
         # add_rms_norm_quant
-        if torch_npu_check:
-            x, _, residual = torch_npu.npu_add_rms_norm_quant(
-                x,
-                residual,
-                self.weight,
-                layer.aclnn_input_scale,
-                layer.aclnn_input_offset,
-                beta=bias,
-                epsilon=self.variance_epsilon)
-        else:
-            x, _, residual = torch_npu.npu_add_rms_norm_quant(
-                x,
-                residual,
-                self.weight,
-                layer.aclnn_input_scale,
-                layer.aclnn_input_offset,
-                epsilon=self.variance_epsilon)
+        x, _, residual = torch_npu.npu_add_rms_norm_quant(
+            x,
+            residual,
+            self.weight,
+            layer.aclnn_input_scale,
+            layer.aclnn_input_offset,
+            beta=bias,
+            epsilon=self.variance_epsilon)
+
         # prefetch qkvo_proj.weight postprocess
         if weight_prefetch_method:
             weight_prefetch_method.maybe_prefetch_attn_weight_postprocess(
@@ -78,7 +68,7 @@ def _addrmsnorm_forward_oot(
             )
 
     else:
-        if is_310p():
+        if get_ascend_device_type() == AscendDeviceType._310P:
             orig_dtype = residual.dtype
             x = x + residual.to(x.dtype)
             residual = x.to(orig_dtype)
@@ -87,7 +77,7 @@ def _addrmsnorm_forward_oot(
         else:
             x, _, residual = torch_npu.npu_add_rms_norm(
                 x, residual, self.weight, self.variance_epsilon)
-        if torch_npu_check and bias is not None:
+        if bias is not None:
             x.add_(bias)
     torch.ops.vllm.maybe_wait_prefetch_done(x)
     return x, residual
@@ -106,9 +96,8 @@ class AscendRMSNorm(RMSNorm):
         super().__init__(hidden_size, eps, var_hidden_size, has_weight, dtype)
         vllm_config = get_current_vllm_config()
         self.bias = None
-        self.torch_npu_check = version_check()
         # quantization with anti_method m4 will generate none-zero norm bias
-        if self.torch_npu_check and vllm_config.quant_config is not None and \
+        if vllm_config.quant_config is not None and \
                 any("norm.bias" in name for name in vllm_config.quant_config.quant_description.keys()):
             self.bias = torch.nn.Parameter(torch.zeros(hidden_size),
                                            requires_grad=False)
@@ -128,7 +117,7 @@ class AscendRMSNorm(RMSNorm):
             return x, residual
         x, residual = torch_npu.npu_rms_norm(x, self.weight,
                                              self.variance_epsilon)
-        if self.torch_npu_check and self.bias is not None:
+        if self.bias is not None:
             x.add_(self.bias)
         return x
 
@@ -207,9 +196,9 @@ class AscendGemmaRMSNorm(GemmaRMSNorm):
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         import torch_npu
 
-        from vllm_ascend.utils import is_310p
+        from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
         if residual is not None:
-            if is_310p():
+            if get_ascend_device_type() == AscendDeviceType._310P:
                 orig_dtype = residual.dtype
                 x = x + residual.to(x.dtype)
                 residual = x.to(orig_dtype)

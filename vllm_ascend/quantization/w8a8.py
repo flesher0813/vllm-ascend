@@ -24,8 +24,10 @@ from vllm.distributed.parallel_state import get_ep_group
 from vllm.forward_context import get_forward_context
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.ops.moe.experts_selector import select_experts
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_310p, is_enable_nz
+from vllm_ascend.ops.fused_moe.experts_selector import select_experts
+from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ,
+                               COMPRESSED_TENSORS_METHOD, AscendDeviceType,
+                               get_ascend_device_type, is_enable_nz)
 
 
 def quant_per_tensor(in_tensor: torch.Tensor,
@@ -45,7 +47,8 @@ class AscendW8A8LinearMethod:
 
     def __init__(self) -> None:
         # aclnn quant matmul requires to transpose matrix B, set to true by default.
-        self.transpose_weight = not is_310p()
+        self.transpose_weight = get_ascend_device_type(
+        ) != AscendDeviceType._310P
 
     @staticmethod
     def get_weight(
@@ -115,12 +118,30 @@ class AscendW8A8LinearMethod:
                     weight=layer.weight,
                     start_flag=x,
                 )
-            # quant
-            x = quant_per_tensor(
-                x,
-                layer.aclnn_input_scale_reciprocal,
-                layer.aclnn_input_offset,
-            )
+
+            quant_comm_config = getattr(layer, "_quant_comm_config", {})
+            comm_fn = quant_comm_config.get("communication_fn")
+            enable_flashcomm2_quant_comm = comm_fn is not None and (
+                "o_proj" in layer.prefix or "out_proj" in layer.prefix)
+            if enable_flashcomm2_quant_comm:
+                quant_input_x = x.contiguous().view(
+                    -1, layer.aclnn_input_scale_reciprocal.size(0))
+                quant_x = quant_per_tensor(
+                    quant_input_x,
+                    layer.aclnn_input_scale_reciprocal,
+                    layer.aclnn_input_offset,
+                )
+                comm_input = quant_x.view(x.size(0), -1)
+                assert comm_fn is not None
+                x = comm_fn(comm_input)
+            else:
+                # quant
+                x = quant_per_tensor(
+                    x,
+                    layer.aclnn_input_scale_reciprocal,
+                    layer.aclnn_input_offset,
+                )
+
             # prefetch qkvo_proj.weight postprocess
             if weight_prefetch_method:
                 weight_prefetch_method.maybe_prefetch_attn_weight_postprocess(
@@ -129,7 +150,11 @@ class AscendW8A8LinearMethod:
                 )
 
         quant_bias = layer.quant_bias if tp_rank == 0 else None
-        if is_310p():
+        if getattr(layer, "ascend_quant_method",
+                   "") == COMPRESSED_TENSORS_METHOD:
+            quant_bias = bias
+
+        if get_ascend_device_type() == AscendDeviceType._310P:
             # On 300I Duo platform, we need transpose again if
             # using nz. This transpose can be skipped in torchair.
             output = torch_npu.npu_quant_matmul(
@@ -167,6 +192,11 @@ class AscendW8A8LinearMethod:
                 layer.weight.data, ACL_FORMAT_FRACTAL_NZ)
         layer.weight_scale.data = torch.flatten(layer.weight_scale.data)
         layer.weight_offset.data = torch.flatten(layer.weight_offset.data)
+        if getattr(layer, "ascend_quant_method",
+                   "") == COMPRESSED_TENSORS_METHOD:
+            deq_scale = layer.input_scale.data * layer.weight_scale.data
+            layer.deq_scale = torch.nn.Parameter(deq_scale,
+                                                 requires_grad=False)
 
 
 class AscendW8A8FusedMoEMethod:
@@ -281,7 +311,7 @@ class AscendW8A8FusedMoEMethod:
             e_score_correction_bias=e_score_correction_bias,
             global_num_experts=global_num_experts)
 
-        if is_310p():
+        if get_ascend_device_type() == AscendDeviceType._310P:
             return fused_experts_310p(hidden_states=x,
                                       w1=layer.w13_weight,
                                       w1_scale=layer.w13_weight_scale,
@@ -310,7 +340,7 @@ class AscendW8A8FusedMoEMethod:
                              expert_map=expert_map)
 
     def process_weights_after_loading(self, layer):
-        if not is_310p():
+        if get_ascend_device_type() != AscendDeviceType._310P:
             layer.w13_weight.data = layer.w13_weight.data.transpose(
                 1, 2).contiguous()
             layer.w2_weight.data = layer.w2_weight.data.transpose(
@@ -327,7 +357,7 @@ class AscendW8A8FusedMoEMethod:
         expanding_factor_w13 = layer.w13_weight.data.shape[1]
         expanding_factor_w2 = layer.w2_weight.data.shape[1]
 
-        if is_310p():
+        if get_ascend_device_type() == AscendDeviceType._310P:
             layer.w13_input_scale.data = torch.nn.Parameter(
                 layer.w13_input_scale.data.max())
             layer.w2_input_scale.data = torch.nn.Parameter(
@@ -347,7 +377,8 @@ class AscendW8A8FusedMoEMethod:
         # converting ACL_FORMAT_FRACTAL_NZ.
         # npu_quant_grouped_matmul_dequant in eager mode does not accept
         # ACL_FORMAT_FRACTAL_NZ.
-        if not is_310p() and is_enable_nz():
+        if get_ascend_device_type() != AscendDeviceType._310P and is_enable_nz(
+        ):
             layer.w13_weight.data = torch_npu.npu_format_cast(
                 layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ).contiguous()
             layer.w2_weight.data = torch_npu.npu_format_cast(

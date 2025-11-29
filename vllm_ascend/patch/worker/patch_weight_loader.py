@@ -3,7 +3,7 @@ from torch.nn.parameter import Parameter
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.utils import GiB_bytes
+from vllm.utils.mem_constants import GiB_bytes
 
 logger = init_logger(__name__)
 

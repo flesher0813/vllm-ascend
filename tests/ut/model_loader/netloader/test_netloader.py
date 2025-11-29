@@ -173,7 +173,7 @@ def test_load_model_elastic_success(mock_logger, monkeypatch, tmp_path):
         "vllm_ascend.model_loader.netloader.netloader.process_weights_after_loading",
         lambda *a, **k: None)
     # patch get_ip
-    monkeypatch.setattr("vllm.utils.get_ip", lambda: "127.0.0.1")
+    monkeypatch.setattr("vllm.utils.network_utils.get_ip", lambda: "127.0.0.1")
     # patch find_free_port
     monkeypatch.setattr(
         "vllm_ascend.model_loader.netloader.netloader.find_free_port",

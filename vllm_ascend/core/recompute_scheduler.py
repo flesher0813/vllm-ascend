@@ -35,7 +35,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import \
     KVConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import \
     KVConnectorStats
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
                                                 compute_encoder_budget)
@@ -55,8 +55,6 @@ from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import ConstantList
 
-logger = init_logger(__name__)
-
 
 class RecomputeScheduler(SchedulerInterface):
     """This Scheduler extends vllm's original v1 scheduler of version 0.11
@@ -67,6 +65,7 @@ class RecomputeScheduler(SchedulerInterface):
         vllm_config: VllmConfig,
         kv_cache_config: KVCacheConfig,
         structured_output_manager: StructuredOutputManager,
+        block_size: Optional[int] = None,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         include_finished_set: bool = False,
         log_stats: bool = False,
@@ -93,7 +92,7 @@ class RecomputeScheduler(SchedulerInterface):
         self.max_num_running_reqs = self.scheduler_config.max_num_seqs
         self.max_num_scheduled_tokens = \
             self.scheduler_config.max_num_batched_tokens
-        self.max_model_len = self.scheduler_config.max_model_len
+        self.max_model_len = self.vllm_config.model_config.max_model_len
         self.enable_kv_cache_events = (
             self.kv_events_config is not None
             and self.kv_events_config.enable_kv_cache_events)
@@ -361,7 +360,7 @@ class RecomputeScheduler(SchedulerInterface):
         skipped_waiting_requests = create_request_queue(self.policy)
 
         # Next, schedule the WAITING requests.
-        if not preempted_reqs:
+        if not preempted_reqs and not recomputed_reqs:
             while self.waiting and token_budget > 0:
                 if len(self.running) == self.max_num_running_reqs:
                     break
@@ -588,7 +587,7 @@ class RecomputeScheduler(SchedulerInterface):
             any_request = self.running[0]
             num_common_prefix_blocks = (
                 self.kv_cache_manager.get_num_common_prefix_blocks(
-                    any_request, len(self.running)))
+                    any_request.request_id))
 
         # Construct the scheduler output.
         new_reqs_data = [
@@ -929,8 +928,9 @@ class RecomputeScheduler(SchedulerInterface):
                 continue
 
             req_index = model_runner_output.req_id_to_index[req_id]
-            generated_token_ids = sampled_token_ids[
-                req_index] if sampled_token_ids else []
+            generated_token_ids: list[int] = (
+                sampled_token_ids[req_index].tolist()
+                if sampled_token_ids else [])
 
             scheduled_spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id))

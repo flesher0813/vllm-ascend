@@ -22,11 +22,13 @@ import torch
 import torch_npu
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.rotary_embedding import (
-    DeepseekScalingRotaryEmbedding, RotaryEmbedding,
+    DeepseekScalingRotaryEmbedding, MRotaryEmbedding, RotaryEmbedding,
     YaRNScalingRotaryEmbedding)
+from vllm.platforms import CpuArchEnum
 
 from vllm_ascend.platform import NPUPlatform
-from vllm_ascend.utils import enable_custom_op, is_310p
+from vllm_ascend.utils import (AscendDeviceType, enable_custom_op,
+                               get_ascend_device_type)
 
 
 def _custom_rotary_embedding_enabled(query, neox_style, head_size):
@@ -48,8 +50,9 @@ def _rope_forward_oot(
     if self.cos_sin_cache.dtype != query.dtype:
         self.cos_sin_cache = self.cos_sin_cache.to(query.dtype)
     # adopt custom kernel path for rotary_embedding
-    if _custom_rotary_embedding_enabled(query, is_neox_style,
-                                        self.head_size) and not is_310p():
+    if _custom_rotary_embedding_enabled(
+            query, is_neox_style, self.head_size) and get_ascend_device_type(
+            ) != AscendDeviceType._310P:
         query, key = torch.ops._C_ascend.rotary_embedding(
             positions,
             query,
@@ -395,3 +398,40 @@ class AscendDeepseekScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
         q_pe, k_pe = _rope_forward_oot(self, positions, query, key,
                                        is_neox_style, offsets)
         return q_pe, k_pe
+
+
+class AscendMRotaryEmbedding(MRotaryEmbedding):
+
+    def forward_oot(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor,
+    ):
+        # TODO: This judgment will be removed once the mrope precision issue is fixed
+        if self.mrope_section != [
+                16, 24, 24
+        ] or NPUPlatform.get_cpu_architecture() == CpuArchEnum.X86:
+            return super().forward_oot(positions, query, key)
+
+        import torch_npu
+        mrope_section = [0, 0, 0
+                         ] if positions.ndim == 1 else self.mrope_section
+
+        if self.cos_sin_cache.device != query.device:  # type: ignore
+            self.cos_sin_cache = self.cos_sin_cache.to(  # type: ignore
+                query.device)  # type: ignore
+
+        if self.cos_sin_cache.dtype != query.dtype:  # type: ignore
+            self.cos_sin_cache = self.cos_sin_cache.to(  # type: ignore
+                query.dtype)  # type: ignore
+
+        query, key = torch_npu.npu_mrope(positions,
+                                         query.contiguous(),
+                                         key.contiguous(),
+                                         self.cos_sin_cache.contiguous(),
+                                         self.head_size,
+                                         mrope_section=mrope_section,
+                                         rotary_mode='half')
+
+        return query, key

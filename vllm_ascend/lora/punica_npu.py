@@ -4,9 +4,9 @@ from typing import Callable, Optional, Tuple, Union
 
 import torch
 
-from vllm_ascend.utils import is_310p
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
-if is_310p():
+if get_ascend_device_type() == AscendDeviceType._310P:
     from vllm.lora.ops.torch_ops import (bgmv_expand, bgmv_expand_slice,
                                          bgmv_shrink, sgmv_expand,
                                          sgmv_expand_slice, sgmv_shrink)
@@ -262,7 +262,6 @@ class PunicaWrapperNPU(PunicaWrapperBase):
                         x: torch.Tensor,
                         lora_a_stacked: Tuple[torch.Tensor, ...],
                         lora_b_stacked: Tuple[torch.Tensor, ...],
-                        lora_bias_stacked: Optional[Tuple[torch.Tensor, ...]],
                         scale: float,
                         output_slices: Tuple[int, ...],
                         *,
@@ -292,10 +291,6 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         """
 
         assert len(lora_a_stacked) == len(lora_b_stacked) == len(output_slices)
-        if lora_bias_stacked is not None:
-            assert len(lora_bias_stacked) == len(output_slices)
-            y = self._apply_bias(self.token_lora_indices, y, output_slices,
-                                 lora_bias_stacked)
 
         if buffer is None:
             r = lora_b_stacked[0].size(-1)

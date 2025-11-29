@@ -19,12 +19,11 @@
 from typing import Any, List, Optional, Union
 
 import torch
-import vllm.envs as envs
 from torch import nn
 from transformers import PretrainedConfig
 from vllm.attention import Attention, AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, CompilationLevel, VllmConfig
+from vllm.config import CacheConfig, CompilationMode, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import (get_dp_group, get_ep_group,
                                              get_tp_group)
@@ -238,12 +237,9 @@ class CustomQwen3MoeAttention(Qwen3MoeAttention):
                                    is_prefill=False,
                                    is_qwen_torchair=True)
             forward_kwargs = {}
-            if envs.VLLM_USE_V1:
-                output_shape = q.shape
-                output = torch.empty(output_shape,
-                                     dtype=q.dtype,
-                                     device=q.device)
-                forward_kwargs['output'] = output
+            output_shape = q.shape
+            output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
+            forward_kwargs['output'] = output
 
             attn_output = self.attn.impl.forward(self.attn,
                                                  q,
@@ -251,7 +247,6 @@ class CustomQwen3MoeAttention(Qwen3MoeAttention):
                                                  v,
                                                  kv_cache=kv_cache,
                                                  attn_metadata=attn_metadata,
-                                                 trace_flag=False,
                                                  **forward_kwargs)
             output, _ = self.o_proj(attn_output)
             return output
@@ -299,8 +294,8 @@ class CustomQwen3MoeDecoderLayer(Qwen3MoeDecoderLayer):
         mlp_only_layers = ([] if not hasattr(config, "mlp_only_layers") else
                            config.mlp_only_layers)
         self.use_aclgraph = (vllm_config is not None
-                             and vllm_config.compilation_config.level
-                             == CompilationLevel.PIECEWISE
+                             and vllm_config.compilation_config.mode
+                             == CompilationMode.VLLM_COMPILE
                              and not vllm_config.model_config.enforce_eager)
         if (layer_idx not in mlp_only_layers) and (
                 config.num_experts > 0 and
@@ -431,7 +426,7 @@ class CustomQwen3MoeModel(Qwen3MoeModel):
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
-                hidden_states = self.get_input_embeddings(input_ids)
+                hidden_states = self.embed_input_ids(input_ids)
             residual = None
         else:
             assert intermediate_tensors is not None

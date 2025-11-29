@@ -20,7 +20,6 @@
 
 Run `pytest tests/test_offline_inference.py`.
 """
-
 from vllm import SamplingParams
 from vllm.assets.audio import AudioAsset
 from vllm.assets.image import ImageAsset

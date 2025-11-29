@@ -18,7 +18,8 @@
 #
 
 import copy
-from typing import Optional, Union
+from types import NoneType
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -35,8 +36,9 @@ from vllm.logger import logger
 from vllm.lora.request import LoRARequest
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, GiB_bytes
-from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.utils.mem_constants import GiB_bytes
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
+from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput,
                              DraftTokenIds, ModelRunnerOutput)
@@ -48,7 +50,7 @@ from vllm_ascend.cpu_binding import bind_cpus
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.platform import NPUPlatform
-from vllm_ascend.utils import (init_ascend_soc_version,
+from vllm_ascend.utils import (check_ascend_device_type, is_enable_nz,
                                prefill_context_parallel_enable,
                                register_ascend_customop, sleep_mode_enabled,
                                try_register_lib)
@@ -89,7 +91,7 @@ class NPUWorker(WorkerBase):
         register_ascend_customop(vllm_config)
         # init ascend config and soc version
         init_ascend_config(vllm_config)
-        init_ascend_soc_version()
+        check_ascend_device_type()
         use_sparse = False
         if vllm_config.model_config is not None:
             use_sparse = hasattr(vllm_config.model_config.hf_config,
@@ -136,7 +138,8 @@ class NPUWorker(WorkerBase):
 
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
-            from vllm.utils import init_cached_hf_modules
+            from vllm.utils.import_utils import init_cached_hf_modules
+
             init_cached_hf_modules()
 
         self.profiler = self._init_profiler()
@@ -179,6 +182,11 @@ class NPUWorker(WorkerBase):
             raise ValueError(
                 "Sleep mode is not enabled. Please compile vllm-ascend with COMPILE_CUSTOM_KERNELS=1."
             )
+
+        if is_enable_nz():
+            raise ValueError(
+                "FRACTAL_NZ mode is enabled. This may cause model parameter precision issues "
+                "in the RL scenarios. Please set VLLM_ASCEND_ENABLE_NZ=0.")
         allocator = CaMemAllocator.get_instance()
         allocator.wake_up(tags=tags)
 
@@ -199,6 +207,20 @@ class NPUWorker(WorkerBase):
         device = torch.device(f"npu:{self.local_rank}")
         NPUPlatform.set_device(device)
         NPUPlatform.empty_cache()
+
+        if (self.parallel_config.data_parallel_size > 1
+                and self.parallel_config.data_parallel_size_local > 0
+                and self.parallel_config.distributed_executor_backend
+                not in ["ray", "external_launcher"] and
+                self.vllm_config.parallel_config.data_parallel_backend != "ray"
+                and self.vllm_config.parallel_config.nnodes_within_dp == 1):
+            visible_device_count = (torch.npu.device_count()
+                                    if torch.npu.is_available() else 0)
+            assert self.parallel_config.local_world_size <= visible_device_count, (
+                f"local_world_size ({self.parallel_config.local_world_size}) must "
+                f"be less than or equal to the number of visible devices "
+                f"({visible_device_count}).")
+
         self.init_npu_memory = NPUPlatform.mem_get_info()[0]
         # Initialize the distributed environment.
         self._init_worker_distributed_environment()
@@ -207,9 +229,12 @@ class NPUWorker(WorkerBase):
         return device
 
     def init_device(self):
-        device = self._init_device()
+        # NOTE: KEEP device the member of `NPUWorker`, as it will be checked
+        # in ray scenario. see https://github.com/vllm-project/vllm/pull/26845
+        # for more details
+        self.device = self._init_device()
         # Init ModelRunner here, so that we have access to self.device.
-        self.model_runner = NPUModelRunner(self.vllm_config, device)
+        self.model_runner = NPUModelRunner(self.vllm_config, self.device)
 
     def determine_available_memory(self) -> int:
         # Profile the memory usage of the model and get the maximum number of
@@ -256,7 +281,7 @@ class NPUWorker(WorkerBase):
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
-    ) -> Optional[Union[ModelRunnerOutput, AsyncModelRunnerOutput]]:
+    ) -> ModelRunnerOutput | None:
         # enable msMonitor to monitor the performance of vllm-ascend
         if envs_ascend.MSMONITOR_USE_DAEMON:
             dp.step()
@@ -270,7 +295,7 @@ class NPUWorker(WorkerBase):
 
         output = self.model_runner.execute_model(scheduler_output,
                                                  intermediate_tensors)
-        if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput)):
+        if isinstance(output, (ModelRunnerOutput, NoneType)):
             return output
 
         assert isinstance(output, IntermediateTensors)
@@ -293,6 +318,12 @@ class NPUWorker(WorkerBase):
         output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
         output.kv_connector_output = kv_connector_output
         return output
+
+    @torch.inference_mode()
+    def sample_tokens(
+        self, grammar_output: "GrammarOutput"
+    ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
+        return self.model_runner.sample_tokens(grammar_output)
 
     def load_model(self) -> None:
         if self.vllm_config.model_config.enable_sleep_mode:
@@ -337,6 +368,9 @@ class NPUWorker(WorkerBase):
 
     def get_model(self) -> nn.Module:
         return self.model_runner.get_model()
+
+    def get_kv_connector_handshake_metadata(self) -> Optional[dict]:
+        return None
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         return self.model_runner.get_kv_cache_spec()

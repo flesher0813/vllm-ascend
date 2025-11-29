@@ -4,7 +4,7 @@ import os
 
 import torch.distributed as dist
 
-from vllm_ascend.utils import AscendSocVersion, init_ascend_soc_version, get_ascend_soc_version
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 parser = argparse.ArgumentParser(
     description="Arguments of rank table generator", )
@@ -42,8 +42,7 @@ local_rank = os.environ.get("LOCAL_RANK")
 # and is different from WORLD_SIZE in gen_rank_table.sh.
 world_size = os.environ.get("WORLD_SIZE")
 
-init_ascend_soc_version()
-soc_info = get_ascend_soc_version()
+device_type = get_ascend_device_type()
 
 
 def get_cmd_stdout(cmd):
@@ -63,7 +62,11 @@ chips_per_card = get_cmd_stdout("npu-smi info -l | grep \"Chip Count\"").split(
 chips_per_card = int(chips_per_card)
 
 if args.local_device_ids:
-    local_device_ids = args.local_device_ids.split(',')
+    try:
+        local_device_ids = [int(id_str) for id_str in args.local_device_ids.split(',')]
+    except ValueError:
+        print(f"Error: --local-device-ids must be a comma-separated list of integers. Received: '{args.local_device_ids}'")
+        exit(1)
 else:
     local_device_ids = []
     for card_id in range(num_cards):
@@ -79,7 +82,7 @@ if local_rank == "0":
         device_id = local_device_ids[idx]
         chip_id = device_id % chips_per_card
         card_id = device_id // chips_per_card
-        if soc_info == AscendSocVersion.A3:
+        if device_type == AscendDeviceType._910_93:
             device_ip = get_cmd_stdout(
                 f"{hccn_tool_path} -i {device_id} -vnic -g | grep ipaddr"
             ).split(":")[1].strip()
@@ -99,7 +102,7 @@ if local_rank == "0":
             "device_id": str(device_id),
             "device_ip": str(device_ip),
         }
-        if soc_info == AscendSocVersion.A3:
+        if device_type == AscendDeviceType._910_93:
             device_info.update({
                 "super_pod_id": str(super_pod_id),
                 "super_device_id": str(super_device_id)

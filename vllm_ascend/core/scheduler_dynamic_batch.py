@@ -16,6 +16,7 @@
 #
 import os
 import time
+from typing import Optional
 
 import pandas as pd
 from vllm.config import VllmConfig
@@ -34,7 +35,7 @@ from vllm.v1.structured_output import StructuredOutputManager
 
 
 class BudgetRefiner:
-    """This budget refiner can make dynamic adjustment to the token budget 
+    """This budget refiner can make dynamic adjustment to the token budget
     in the chunked prefill scheduling strategy."""
 
     def __init__(self, default_budget, slo_limit=-1) -> None:
@@ -122,12 +123,13 @@ class SchedulerDynamicBatch(Scheduler):
         vllm_config: VllmConfig,
         kv_cache_config: KVCacheConfig,
         structured_output_manager: StructuredOutputManager,
+        block_size: Optional[int] = None,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         include_finished_set: bool = False,
         log_stats: bool = False,
     ) -> None:
         super().__init__(vllm_config, kv_cache_config,
-                         structured_output_manager, mm_registry,
+                         structured_output_manager, block_size, mm_registry,
                          include_finished_set, log_stats)
         self.running: list[Request] = []
         self.budget_refiner = BudgetRefiner(
@@ -414,8 +416,8 @@ class SchedulerDynamicBatch(Scheduler):
                     # Schedule encoder inputs.
                     if request.has_encoder_inputs:
                         (encoder_inputs_to_schedule, num_new_tokens,
-                         new_encoder_compute_budget
-                         ) = self._try_schedule_encoder_inputs(
+                         new_encoder_compute_budget,
+                         _) = self._try_schedule_encoder_inputs(
                              request, num_computed_tokens, num_new_tokens,
                              encoder_compute_budget)
                         if num_new_tokens == 0:
@@ -533,8 +535,7 @@ class SchedulerDynamicBatch(Scheduler):
             any_request = self.running[0]
             num_common_prefix_blocks = (
                 self.kv_cache_manager.get_num_common_prefix_blocks(
-                    any_request, len(self.running)))
-
+                    any_request.request_id))
         # Construct the scheduler output.
         new_reqs_data = [
             NewRequestData.from_request(
@@ -548,11 +549,6 @@ class SchedulerDynamicBatch(Scheduler):
             scheduled_spec_decode_tokens,
             req_to_new_blocks,
         )
-        scheduled_requests = (scheduled_new_reqs + scheduled_running_reqs +
-                              scheduled_resumed_reqs)
-        structured_output_request_ids, grammar_bitmask = (
-            self.get_grammar_bitmask(scheduled_requests,
-                                     scheduled_spec_decode_tokens))
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=cached_reqs_data,
@@ -568,8 +564,6 @@ class SchedulerDynamicBatch(Scheduler):
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=self.encoder_cache_manager.
             get_freed_mm_hashes(),
-            structured_output_request_ids=structured_output_request_ids,
-            grammar_bitmask=grammar_bitmask,
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:

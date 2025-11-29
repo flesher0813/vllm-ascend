@@ -28,7 +28,8 @@ from vllm.model_executor.model_loader import register_model_loader
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.model_executor.model_loader.utils import (
-    initialize_model, process_weights_after_loading, set_default_torch_dtype)
+    initialize_model, process_weights_after_loading)
+from vllm.utils.torch_utils import set_default_torch_dtype
 
 from .interaction.elastic import ElasticServer
 from .load import elastic_load
@@ -200,7 +201,8 @@ class ModelNetLoaderElastic(BaseModelLoader):
         if model is not None and (
             (self.listen_port and self.listen_port in range(1024, 65535)) or
             (self.listen_port is None)):
-            from vllm.utils import get_ip
+
+            from vllm.utils.network_utils import get_ip
             driver_ip = get_ip()
 
             if driver_ip == '0.0.0.0':

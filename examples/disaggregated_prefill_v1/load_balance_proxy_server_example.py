@@ -15,7 +15,7 @@
 # - Streams responses from backend servers to clients.
 #
 # Prerequisites:
-# - Python 3.8+
+# - Python 3.10+
 # - Install dependencies:
 #     pip install fastapi httpx uvicorn vllm
 #
@@ -88,6 +88,7 @@ import argparse
 import asyncio
 import functools
 import heapq
+import ipaddress
 import json
 import os
 import sys
@@ -118,6 +119,12 @@ class ServerState:
         self.host = host
         self.port = port
         self.url = f'http://{host}:{port}/v1'
+        try:
+            ip = ipaddress.ip_address(self.host)
+            if isinstance(ip, ipaddress.IPv6Address):
+                self.url = f'http://[{host}]:{port}/v1'
+        except Exception:
+            pass
         self.client = httpx.AsyncClient(timeout=None,
                                         base_url=self.url,
                                         limits=httpx.Limits(
@@ -366,6 +373,8 @@ async def send_request_to_service(client: httpx.AsyncClient,
     req_data["stream"] = False
     req_data["max_tokens"] = 1
     req_data["min_tokens"] = 1
+    if "max_completion_tokens" in req_data:
+        req_data["max_completion_tokens"] = 1
     if "stream_options" in req_data:
         del req_data["stream_options"]
     headers = {
@@ -539,7 +548,13 @@ async def _handle_completions(api: str, request: Request):
                                 instance_info.prefiller_idx,
                                 instance_info.prefiller_score)
                             released_kv = True
-                        chunk_str = chunk.decode("utf-8").strip()
+                        try:
+                            chunk_str = chunk.decode("utf-8").strip()
+                        except UnicodeDecodeError:
+                            logger.debug(
+                                f"Skipping chunk: {chunk}")
+                            yield chunk
+                            continue
                         if not chunk_str:
                             continue
                         if chunk_str.startswith("data: "):
@@ -548,7 +563,7 @@ async def _handle_completions(api: str, request: Request):
                             chunk_json = json.loads(chunk_str)
                         except json.JSONDecodeError:
                             # if chunk is [done], skip it.
-                            logger.warning(
+                            logger.debug(
                                 f"Skipping chunk: {chunk_str}")
                             yield chunk
                             continue

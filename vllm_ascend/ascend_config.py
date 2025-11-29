@@ -34,16 +34,14 @@ class AscendConfig:
 
     def __init__(self, vllm_config):
         additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
-
         torchair_graph_config = additional_config.get("torchair_graph_config",
                                                       {})
         self.torchair_graph_config = TorchairGraphConfig(
             torchair_graph_config, vllm_config, additional_config)
 
-        ascend_scheduler_config = additional_config.get(
-            "ascend_scheduler_config", {})
-        self.ascend_scheduler_config = AscendSchedulerConfig(
-            ascend_scheduler_config)
+        # Dump / PrecisionDebugger configuration
+        dump_config_path = additional_config.get("dump_config", None)
+        self.dump_config = DumpConfig(dump_config_path)
 
         weight_prefetch_config = additional_config.get(
             "weight_prefetch_config", {})
@@ -93,7 +91,7 @@ class AscendConfig:
                 raise AssertionError(
                     "oproj_tensor_parallel_size is only supported in the pure DP scenario"
                 )
-            if not self.torchair_graph_config.enabled:
+            if vllm_config.model_config.enforce_eager is True:
                 raise AssertionError(
                     "oproj_tensor_parallel_size is only supported in graph mode"
                 )
@@ -131,6 +129,10 @@ class AscendConfig:
                     "Only support P node tp size lagger then D node tp size")
         self.SLO_limits_for_dynamic_batch = additional_config.get(
             "SLO_limits_for_dynamic_batch", -1)
+        from vllm_ascend.utils import \
+            get_flashcomm2_oproj_tp_size_and_validate_config
+        self.flashcomm2_oproj_tensor_parallel_size = get_flashcomm2_oproj_tp_size_and_validate_config(
+            self, vllm_config)
 
 
 class TorchairGraphConfig:
@@ -213,18 +215,16 @@ class TorchairGraphConfig:
             )
 
 
-class AscendSchedulerConfig:
+class DumpConfig:
     """
-    Configuration Object for ascend_scheduler_config from additional_config
+    Configuration object for dump/PrecisionDebugger settings.
     """
 
-    def __init__(self, ascend_scheduler_config: dict):
-        self.enabled = ascend_scheduler_config.get("enabled", False)
-        # Ascend scheduler is based on vllm v0 scheduler, so we should support
-        # all vllm v0 scheduler configs as well.
-        for k, v in ascend_scheduler_config.items():
-            if not hasattr(self, k):
-                setattr(self, k, v)
+    def __init__(self, dump_config_path: Optional[str] = None):
+        # enable_dump is True when dump_cfg exists and config_path is not empty
+        self.enable_dump: bool = bool(dump_config_path)
+        # Path to msprobe config json; may be None.
+        self.config_path: Optional[str] = dump_config_path
 
 
 class WeightPrefetchConfig:

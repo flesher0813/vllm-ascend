@@ -3,7 +3,8 @@ import vllm.model_executor.models.config
 from vllm.logger import init_logger
 from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.models.config import MambaModelConfig
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv
+from vllm.utils.math_utils import cdiv
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
 
 
@@ -51,7 +52,7 @@ def verify_and_update_config(cls, vllm_config) -> None:
         block_size=model_config.max_model_len,
     ).page_size_bytes
 
-    block_alignment_bytes = 64
+    block_alignment_bytes = 128
 
     # some attention backends (e.g. FA) only support setting
     # block size to multiple of 16, so let's suggest a value

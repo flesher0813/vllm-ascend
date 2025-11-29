@@ -20,6 +20,13 @@ set(VLLM_ASCEND_INSTALL_PATH "${CMAKE_INSTALL_PREFIX}")
 
 find_package(Torch REQUIRED)
 
+run_python(TORCH_VERSION
+  "import torch; print(torch.__version__)" "Failed to locate torch path")
+# check torch version is 2.7.1
+if(NOT ${TORCH_VERSION} VERSION_EQUAL "2.7.1")
+  message(FATAL_ERROR "Expected PyTorch version 2.7.1, but found ${TORCH_VERSION}")
+endif()
+
 set(RUN_MODE "npu" CACHE STRING "cpu/sim/npu")
 set(SOC_VERSION ${SOC_VERSION})
 message(STATUS "Detected SOC version: ${SOC_VERSION}")
@@ -56,7 +63,8 @@ ascendc_library(vllm_ascend_kernels SHARED
 message("TORCH_NPU_PATH is ${TORCH_NPU_PATH}")
 
 file(GLOB VLLM_ASCEND_SRC
-${CMAKE_CURRENT_SOURCE_DIR}/csrc/*.cpp)
+${CMAKE_CURRENT_SOURCE_DIR}/csrc/*.cpp
+${CMAKE_CURRENT_SOURCE_DIR}/csrc/aclnn_torch_adapter/*.cpp)
 
 include_directories(
   ${pybind11_INCLUDE_DIRS}
@@ -74,6 +82,7 @@ set(
   ${TORCH_NPU_INCLUDE_DIRS}
   ${ASCEND_HOME_PATH}/include
   ${ASCEND_HOME_PATH}/aarch64-linux/include/experiment/platform
+  ${ASCEND_HOME_PATH}/x86_64-linux/include/experiment/platform
 )
 
 pybind11_add_module(vllm_ascend_C ${VLLM_ASCEND_SRC})
@@ -81,6 +90,7 @@ pybind11_add_module(vllm_ascend_C ${VLLM_ASCEND_SRC})
 target_link_directories(
   vllm_ascend_C
   PRIVATE
+  ${TORCH_LIBRARY_DIRS}
   ${TORCH_NPU_PATH}/lib/
   ${ASCEND_HOME_PATH}/lib64
 )
@@ -89,7 +99,7 @@ target_link_libraries(
   vllm_ascend_C
   PUBLIC
   ${TORCH_LIBRARIES}
-  libtorch_npu.so
+  torch_npu
   vllm_ascend_kernels
   ascendcl
   tiling_api
@@ -97,6 +107,7 @@ target_link_libraries(
   platform
   ascendalog
   dl
+  opapi
 )
 
 target_link_options(vllm_ascend_C PRIVATE "-Wl,-rpath,$ORIGIN:$ORIGIN/lib")
